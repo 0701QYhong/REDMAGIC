@@ -13,7 +13,7 @@ if (Test-Path $Out) { Remove-Item -LiteralPath $Out }
 $tmp = Join-Path $dist ("build-" + [guid]::NewGuid().ToString("N"))
 try {
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-    Get-ChildItem $root -Force | Where-Object { $_.Name -notin "dist", ".git" } | ForEach-Object {
+    Get-ChildItem $root -Force | Where-Object { $_.Name -notin "dist", ".git", ".gitattributes" } | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $tmp -Recurse -Force
     }
 
