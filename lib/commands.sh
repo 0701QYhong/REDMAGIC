@@ -1,0 +1,232 @@
+#!/system/bin/sh
+# ============================================================
+# 前端命令的唯一入口。每个 action 的规矩：
+#   1) 先校验值（非法值直接丢，绝不写半截状态）
+#   2) 再写记忆（state.txt / 标记）
+#   3) 最后才动节点；节点写失败必须回滚记忆，否则 reconcile 会反复重放
+# ============================================================
+
+# 数值校验：整型且落在 [lo,hi]
+num_ok() { case "$1" in ''|*[!0-9]*) return 1;; esac; [ "$1" -ge "$2" ] 2>/dev/null && [ "$1" -le "$3" ] 2>/dev/null; }
+
+# 单开关：on/off -> 标记 + 记忆；sup 里给的功能实际不成立就回滚
+set_flag() {   # set_flag KEY on|off
+    local k="$1" v="$2" f
+    f=$(flag_file "$k")
+    if [ "$v" = "on" ]; then : > "$f" 2>/dev/null; else rm -f "$f" 2>/dev/null; fi
+    cfg_set "$(flag_key "$k")" "$([ "$v" = "on" ] && echo 1 || echo 0)"
+}
+
+webui_handle_cmd() {
+    local action="$1" v="$2" lv sp
+    case "$action" in
+        hb)
+            : > "$WEBUI_HB" 2>/dev/null
+            ;;
+        # ---------- 风扇 ----------
+        fan_on)
+            set_flag fan "$v"
+            if [ "$v" = "on" ]; then
+                if ! fan_sys_on; then
+                    mlog "风扇: 系统开关为关，已记为开但暂不接管"
+                else
+                    lv=$(stq '风扇档位')
+                    case "$lv" in 1|2|3|4|5) fan_level_write "$lv" || { mlog "风扇: 写档位失败"; rm -f "$F_FAN"; cfg_set '风扇极速' 0; };; esac
+                fi
+            else
+                fan_release
+            fi
+            ;;
+        fan_level)
+            num_ok "$v" 1 5 || return 0
+            cfg_set '风扇档位' "$v"
+            [ -f "$F_FAN" ] && fan_level_write "$v"
+            ;;
+        fan_keep)  # on|off 息屏保持
+            if [ "$v" = "on" ]; then
+                : > "$F_FAN_KEEP"; cfg_set '风扇息屏保持' 1
+            else
+                rm -f "$F_FAN_KEEP"; cfg_set '风扇息屏保持' 0; fan_keep_stop
+            fi
+            ;;
+        fan_temp)  # off|auto|custom
+            case "$v" in
+                off) rm -f "$F_FAN_TEMP"; cfg_set '风扇温度联动' 0;;
+                auto|custom) : > "$F_FAN_TEMP"; cfg_set '风扇温度联动' 1; cfg_set '温度联动模式' "$v"; set_flag fan on;;
+                *) return 0;;
+            esac
+            ;;
+        fan_temp_thr)
+            num_ok "$v" 20 70 || return 0
+            cfg_set '风扇触发温度' "$v"
+            ;;
+        # ---------- 液冷 ----------
+        pump_on)
+            set_flag pump "$v"
+            if [ "$v" = "on" ]; then
+                if ! pump_sys_on; then
+                    mlog "液冷: 系统开关为关，已记为开但暂不接管"
+                else
+                    lv=$(stq '液冷档位')
+                    case "$lv" in 1|2|3|4) pump_speed_write "$(pump_speed_of "$lv")" || { mlog "液冷: 写转速失败"; rm -f "$F_PUMP"; cfg_set '液冷控制' 0; };; esac
+                fi
+            else
+                pump_release
+            fi
+            ;;
+        pump_level)
+            num_ok "$v" 1 4 || return 0
+            cfg_set '液冷档位' "$v"
+            [ -f "$F_PUMP" ] && pump_speed_write "$(pump_speed_of "$v")"
+            ;;
+        pump_keep)  # on|off 息屏保持
+            if [ "$v" = "on" ]; then : > "$F_PUMP_KEEP"; cfg_set '液冷息屏保持' 1; else rm -f "$F_PUMP_KEEP"; cfg_set '液冷息屏保持' 0; pump_keep_stop; fi
+            ;;
+        pump_temp)  # off|auto|custom
+            case "$v" in
+                off) rm -f "$F_PUMP_TEMP"; cfg_set '液冷温度联动' 0;;
+                auto|custom) : > "$F_PUMP_TEMP"; cfg_set '液冷温度联动' 1; cfg_set '液冷联动模式' "$v"; set_flag pump on;;
+                *) return 0;;
+            esac
+            ;;
+        pump_temp_thr)
+            num_ok "$v" 20 70 || return 0
+            cfg_set '液冷触发温度' "$v"
+            ;;
+        # ---------- 充电分离 ----------
+        charge_on)
+            set_flag charge "$v"
+            # 开关一落就同步系统分离开关和快照缓存，不等 3 秒巡逻
+            if [ "$v" = "on" ]; then
+                charge_sep_set "$(charge_sep_want)"
+            else
+                charge_sep_set 0
+            fi
+            ;;
+        charge_thr)
+            num_ok "$v" 20 100 || return 0
+            printf '%s\n' "$v" > "$SEP_LIMIT" 2>/dev/null
+            cfg_set '充电分离阈值' "$v"
+            ;;
+        # ---------- 温控 ----------
+        thermal_on)
+            if [ "$v" = "on" ]; then
+                if thermal_on; then
+                    : > "$F_THERMAL"; cfg_set '温控移除' 1
+                    # 解除热降流依赖温控：温控重新开起来就顺带恢复
+                    [ -f "$F_BOOST_HEAT" ] && heat_apply
+                else
+                    mlog "温控屏蔽: 开启失败"
+                    rm -f "$F_THERMAL"; cfg_set '温控移除' 0
+                fi
+            else
+                thermal_off
+                rm -f "$F_THERMAL"; cfg_set '温控移除' 0
+                # 温控关掉后充电加速失去前置条件，必须一起关
+                if [ -f "$F_BOOST" ]; then
+                    boost_release
+                    rm -f "$F_BOOST"; cfg_set '充电加速' 0
+                    mlog "充电加速: 温控已关闭，连带停止加速"
+                fi
+            fi
+            ;;
+        # ---------- 充电加速 ----------
+        boost_on)
+            if [ "$v" = "on" ]; then
+                if ! thermal_effective; then
+                    mlog "充电加速: 需先开启温控屏蔽"
+                    rm -f "$F_BOOST"; cfg_set '充电加速' 0
+                    return 0
+                fi
+                if boost_guard; then
+                    : > "$F_BOOST"; cfg_set '充电加速' 1
+                    # 写失败就回滚开关，绝不让界面显示“加速中”而节点没动
+                    boost_apply || {
+                        boost_release || errlog "充电加速: 回滚还原失败，快照已保留"
+                        rm -f "$F_BOOST"; cfg_set '充电加速' 0
+                        mlog "充电加速: 写入失败，已回滚开关"
+                    }
+                else
+                    mlog "充电加速: 守卫未通过（温度/电量/分离），记为开，条件满足后自动生效"
+                    : > "$F_BOOST"; cfg_set '充电加速' 1
+                fi
+            else
+                rm -f "$F_BOOST"; cfg_set '充电加速' 0
+                boost_release
+            fi
+            ;;
+        release)   # 前端侧滑返回时发的收尾命令：把「息屏保持」这类临时接管还回去
+            [ -f "$SNAP_FAN_KEEP" ] && fan_keep_stop
+            [ -f "$SNAP_PUMP_KEEP" ] && pump_keep_stop
+            ;;
+        boost_thr)
+            num_ok "$v" 20 70 || return 0
+            printf '%s\n' "$v" > "$BOOST_LIMIT" 2>/dev/null
+            cfg_set '充电加速温度上限' "$v"
+            ;;
+        boost_heat)
+            if [ "$v" = "on" ]; then
+                if heat_apply; then : > "$F_BOOST_HEAT"; cfg_set '解除热降流' 1
+                else mlog "解除热降流: 本机无 battery 降温设备"; rm -f "$F_BOOST_HEAT"; cfg_set '解除热降流' 0; fi
+            else
+                rm -f "$F_BOOST_HEAT"; cfg_set '解除热降流' 0; heat_release
+            fi
+            ;;
+        # ---------- 亮度 ----------
+        bright_on)
+            set_flag brightness "$v"
+            if [ "$v" = "on" ] && [ -e "$BRIGHT_NA" ]; then
+                # 目标值可能刚改过，清除旧的“不可用”结论，让守护重试一次
+                rm -f "$BRIGHT_NA"
+            fi
+            ;;
+        bright_goal)
+            num_ok "$v" 1 20000 || return 0
+            cfg_set '亮度解锁目标' "$v"
+            rm -f "$BRIGHT_NA" 2>/dev/null
+            ;;
+        # ---------- 触控 ----------
+        touch_on)
+            set_flag touch "$v"
+            if [ "$v" = "on" ]; then
+                if [ "$(touch_missing_nodes)" != "0" ]; then
+                    mlog "触控: 节点缺失，无法开启"
+                    rm -f "$F_TOUCH"; cfg_set '触控优化' 0
+                else
+                    touch_apply
+                fi
+            else
+                TOUCH_WAIT_MAX=15 touch_restore >/dev/null 2>&1 || true
+            fi
+            ;;
+        touch_preset)
+            case "$v" in official_gaming|official_daily) ;; *) return 0;; esac
+            touch_preset_to_state "$v"
+            [ -f "$F_TOUCH" ] && touch_apply
+            ;;
+        touch_param)  # 名=值
+            local k="${v%%=*}" val="${v#*=}"
+            [ "$k" != "$v" ] || return 0
+            case "$val" in ''|*[!0-9,]*) return 0;; esac
+            val=$(printf '%s' "$val" | cut -c1-64)
+            # 只允许触控表里已有的项，防止任意 key 被写进 state.txt
+            grep -q "^$k|" "$TOUCH_TABLE" 2>/dev/null || return 0
+            cfg_set "$k" "$val"
+            ;;
+        touch_apply)
+            [ -f "$F_TOUCH" ] && touch_apply
+            ;;
+        # ---------- 采样率 ----------
+        rate_on)
+            set_flag rate "$v"
+            if [ "$v" = "on" ]; then rate_boost_on; else rate_boost_off; fi
+            ;;
+        rate_max)
+            num_ok "$v" 60 2400 || return 0
+            cfg_set '采样率上限' "$v"; RATE_TARGET=""
+            [ -f "$F_RATE" ] && rate_boost_on
+            ;;
+        *) mlog "未知命令: $action" ;;
+    esac
+    return 0
+}
