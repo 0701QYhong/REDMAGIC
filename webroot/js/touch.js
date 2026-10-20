@@ -1,30 +1,31 @@
-/* REDMAGIC v3.0.2 —— 触控页：13 项参数全部下拉选择，不接受手填
+/* REDMAGIC v3.0.5 —— 触控页：8 项档位下拉 + 5 项自定义数值（只收整数）
    数据流是单向的：
      快照 touch_vals（英文短名=值;…）→ 回填表单（dirty 时跳过）→ 用户改 → dirty=1
      → 点「应用」：逐项发 touch_param 存记忆，再发 touch_apply 写节点 → dirty=0
-   未连接服务（拿不到快照）时表单只存 localStorage，不假装写成功了。 */
+   自定义项按驱动实测范围校验：像素 0–255，时间 0–10000 ms，长按范围 4 个 0–255。 */
 (function (g) {
   'use strict';
   var t = g.t;
   var C = null;   // CARDS，init 之后再取
 
   /* 与 lib/touch_table.txt 顺序严格一致；key 与后端 touch_key() 映射一致 */
-  /* opts 是下拉里的可选值；bin=1 的项显示「关/开」，其余直接显示数值。
-     当前值不在列表里时会在回填阶段补一个同名选项，保证出厂值不会丢。 */
+  /* opts=下拉档位，bin=1 显示「关/开」；num=[min,max] 走数字输入；
+     list=N 表示 N 个 0..max 的逗号列表。范围来自 NX809J 驱动实写回读：
+     jitter_pixel / click_pixel 是 u8，两个 timer 至少接受 60000 ms。 */
   var ITEMS = [
     { key: 'game',       cn: '游戏模式',   opts: ['0', '1'], bin: 1 },
     { key: 'follow',     cn: '跟手速度',   opts: ['0', '1', '2', '3', '4'] },
-    { key: 'stability',  cn: '稳定程度',   opts: ['0', '1', '2'] },
+    { key: 'stability',  cn: '稳定程度',   opts: ['0', '1', '2', '3', '4'] },
     { key: 'sensibility',cn: '灵敏程度',   opts: ['0', '1', '2', '3', '4'] },
     { key: 'report',     cn: '上报频率',   opts: ['0', '1', '2', '3', '4'] },
     { key: 'edge_deb',   cn: '边缘防抖',   opts: ['0', '1'], bin: 1 },
-    { key: 'edge_px',    cn: '防抖像素',   opts: ['0', '1', '5', '10', '15', '20', '30', '50'] },
-    { key: 'edge_ms',    cn: '防抖时间',   opts: ['0', '40', '80', '100', '150', '200', '300', '500', '800'] },
-    { key: 'click_tol',  cn: '点击容错',   opts: ['0', '5', '10', '15', '20', '30', '50'] },
+    { key: 'edge_px',    cn: '防抖像素',   num: [0, 255], tip: 'tip_px' },
+    { key: 'edge_ms',    cn: '防抖时间',   num: [0, 10000], tip: 'tip_ms' },
+    { key: 'click_tol',  cn: '点击容错',   num: [0, 255], tip: 'tip_px' },
     { key: 'long_on',    cn: '长按识别',   opts: ['0', '1'], bin: 1 },
-    { key: 'long_ms',    cn: '长按时长',   opts: ['0', '100', '200', '300', '400', '500', '600', '800', '1000'] },
-    { key: 'long_range', cn: '长按范围',   opts: ['0,0,0,0', '5,5,10,10', '10,10,20,20', '20,20,20,20', '20,20,30,30', '30,30,40,40'] },
-    { key: 'edge_anti',  cn: '边缘防误触', opts: ['0', '1', '2', '3', '4', '5'] }
+    { key: 'long_ms',    cn: '长按时长',   num: [0, 10000], tip: 'tip_ms' },
+    { key: 'long_range', cn: '长按范围',   list: 4, max: 255, tip: 'tip_range4' },
+    { key: 'edge_anti',  cn: '边缘防误触', opts: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'] }
   ];
 
   var PRESETS = {
@@ -43,11 +44,53 @@
   var dirty = false;
   var formBuilt = false;
   var curPreset = 'official_gaming';
+  var naShown = '';
+  var rbShown = '';
 
   function inputs() {
     var box = document.getElementById('touchForm');
     if (!box) return [];
-    return box.querySelectorAll('select');
+    return box.querySelectorAll('select,input');
+  }
+
+  function itemOf(k) {
+    for (var i = 0; i < ITEMS.length; i++) if (ITEMS[i].key === k) return ITEMS[i];
+    return null;
+  }
+
+  function zeros(n) {
+    var a = [];
+    for (var i = 0; i < n; i++) a.push('0');
+    return a.join(',');
+  }
+
+  function rangeText(it) {
+    return it.num ? it.num[0] + '–' + it.num[1] : it.list + '×0–' + it.max;
+  }
+
+  /* 合法值原样返回（去空格、去前导零），非法返回 '' */
+  function normVal(it, raw) {
+    var s = String(raw == null ? '' : raw), v;
+    if (it.list) {
+      /* 逗号、中文逗号、空格都当分隔符；多打的逗号压掉 */
+      v = s.replace(/\s+/g, ',').replace(/，/g, ',').replace(/,+/g, ',').replace(/^,|,$/g, '');
+      if (!/^[0-9]+(,[0-9]+)*$/.test(v)) return '';
+      var a = v.split(',');
+      if (a.length !== it.list) return '';
+      for (var i = 0; i < a.length; i++) {
+        if (+a[i] > it.max) return '';
+        a[i] = String(+a[i]);
+      }
+      return a.join(',');
+    }
+    v = s.replace(/\s+/g, '');
+    if (!/^[0-9]+$/.test(v)) return '';
+    if (+v < it.num[0] || +v > it.num[1]) return '';
+    return String(+v);
+  }
+
+  function badToast(it) {
+    C.toast(t('toast_range') + ' · ' + t('touch_item_' + ITEMS.indexOf(it)) + ' ' + rangeText(it), 'bad');
   }
 
   function build() {
@@ -55,22 +98,43 @@
     if (!box || formBuilt) return;
     var html = '';
     for (var i = 0; i < ITEMS.length; i++) {
-      var it = ITEMS[i], opt = '';
-      for (var j = 0; j < it.opts.length; j++) {
-        var v = it.opts[j], lb = v;
-        if (it.bin) lb = v === '0' ? t('off_s') : t('on');
-        opt += '<option value="' + v + '"' + (it.bin ? ' data-i18n="' + (v === '0' ? 'off_s' : 'on') + '"' : '') + '>' + lb + '</option>';
+      var it = ITEMS[i], ctl;
+      if (it.num || it.list) {
+        ctl = '<div class="ctl"><input id="tp_' + it.key + '" data-k="' + it.key + '"' +
+              (it.num
+                ? ' type="number" inputmode="numeric" min="' + it.num[0] + '" max="' + it.num[1] + '" step="1"'
+                : ' type="text" placeholder="' + zeros(it.list) + '"') +
+              '><span class="tip" data-i18n="' + it.tip + '">' + t(it.tip) + '</span></div>';
+      } else {
+        var opt = '';
+        for (var j = 0; j < it.opts.length; j++) {
+          var v = it.opts[j], lb = v;
+          if (it.bin) lb = v === '0' ? t('off_s') : t('on');
+          opt += '<option value="' + v + '"' + (it.bin ? ' data-i18n="' + (v === '0' ? 'off_s' : 'on') + '"' : '') + '>' + lb + '</option>';
+        }
+        ctl = '<select id="tp_' + it.key + '" data-k="' + it.key + '">' + opt + '</select>';
       }
-      html += '<div class="it"><label class="nm" for="tp_' + it.key + '">' + t('touch_item_' + i) + '</label>' +
-              '<select id="tp_' + it.key + '" data-k="' + it.key + '">' + opt + '</select></div>';
+      html += '<div class="it"><label class="nm" for="tp_' + it.key + '">' + t('touch_item_' + i) + '</label>' + ctl + '</div>';
     }
     box.innerHTML = html;
     var is = inputs();
     for (var j = 0; j < is.length; j++) {
-      is[j].addEventListener('change', function () {
+      var el = is[j];
+      el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', function () {
         dirty = true;
         markDirty();
+        var it = itemOf(this.getAttribute('data-k'));
+        if (!it || (!it.num && !it.list)) return;
+        var ok = this.value === '' || normVal(it, this.value) !== '';
+        this.classList.toggle('bad', !ok);
       });
+      if (el.tagName !== 'SELECT') {
+        /* 失焦就提示一次，不用等点「应用」才发现填错 */
+        el.addEventListener('change', function () {
+          var it = itemOf(this.getAttribute('data-k'));
+          if (it && this.value !== '' && normVal(it, this.value) === '') badToast(it);
+        });
+      }
     }
     formBuilt = true;
   }
@@ -82,9 +146,32 @@
   function readForm() {
     var o = {}, is = inputs();
     for (var i = 0; i < is.length; i++) {
-      var v = String(is[i].value).replace(/\s+/g, '').replace(/，/g, ',');
-      if (v === '' || !/^[0-9]+(,[0-9]+)*$/.test(v)) return null;
-      o[is[i].getAttribute('data-k')] = v;
+      var el = is[i], it = itemOf(el.getAttribute('data-k')), v;
+      if (el.disabled) continue;   // 驱动不支持的项不提交
+      if (it && (it.num || it.list)) {
+        if (String(el.value).replace(/\s+/g, '') === '') {
+          el.classList.add('bad');
+          el.focus();
+          C.toast(t('toast_empty') + ' · ' + t('touch_item_' + ITEMS.indexOf(it)), 'bad');
+          return null;
+        }
+        v = normVal(it, el.value);
+        if (v === '') {
+          el.classList.add('bad');
+          el.focus();
+          badToast(it);
+          return null;
+        }
+        el.classList.remove('bad');
+        el.value = v;
+      } else {
+        v = String(el.value).replace(/\s+/g, '').replace(/，/g, ',');
+        if (v === '' || !/^[0-9]+(,[0-9]+)*$/.test(v)) {
+          C.toast(t('toast_bad'), 'bad');
+          return null;
+        }
+      }
+      o[el.getAttribute('data-k')] = v;
     }
     return o;
   }
@@ -94,17 +181,20 @@
     for (var i = 0; i < is.length; i++) {
       var k = is[i].getAttribute('data-k');
       if (!vals || vals[k] == null || document.activeElement === is[i]) continue;
-      var v = vals[k], has = false;
-      for (var j = 0; j < is[i].options.length; j++) {
-        if (is[i].options[j].value === v) { has = true; break; }
-      }
-      if (!has) {
-        var o = document.createElement('option');
-        o.value = v;
-        o.textContent = v;
-        is[i].appendChild(o);
+      var v = String(vals[k]), has = false;
+      if (is[i].tagName === 'SELECT') {
+        for (var j = 0; j < is[i].options.length; j++) {
+          if (is[i].options[j].value === v) { has = true; break; }
+        }
+        if (!has) {
+          var o = document.createElement('option');
+          o.value = v;
+          o.textContent = v;
+          is[i].appendChild(o);
+        }
       }
       is[i].value = v;
+      is[i].classList.remove('bad');
     }
   }
 
@@ -144,7 +234,8 @@
   /* 逐项发命令；全部发完才发 touch_apply 写节点 */
   function applyAll() {
     var vals = readForm();
-    if (!vals) { C.toast(t('toast_bad'), 'bad'); return; }
+    /* readForm 已为具体项弹过「超出范围/未填写」，这里再弹会把它盖掉 */
+    if (!vals) return;
     var keys = [];
     for (var k in vals) if (vals.hasOwnProperty(k)) keys.push(k);
     var i = 0, chain = Promise.resolve();
@@ -156,7 +247,7 @@
       chain = chain.then(function () { return g.API.send('touch_param', kv); });
       i++;
     });
-    if (i === 0) { C.toast(t('toast_bad'), 'bad'); return; }
+    if (i === 0) { C.toast(t('toast_na_all'), 'bad'); return; }
     chain.then(function () {
       return g.API.send('touch_apply', '');
     }).then(function () {
@@ -181,9 +272,54 @@
     markDirty();
   }
 
+  function rowOf(el) {
+    var p = el;
+    while (p && p.classList && !p.classList.contains('it')) p = p.parentNode;
+    return p && p.classList ? p : null;
+  }
+
+  /* touch_na：节点连原始值都读不出，这项不写也不校验，界面置灰说明原因 */
+  function paintNA(s) {
+    var names = String(s || '').split(','), sig = '';
+    for (var i = 0; i < ITEMS.length; i++) {
+      var it = ITEMS[i], el = document.getElementById('tp_' + it.key);
+      if (!el) continue;
+      var off = names.indexOf(it.cn) >= 0;
+      if (off) sig += (sig ? '、' : '') + it.cn;
+      el.disabled = off;
+      var row = rowOf(el);
+      if (row) row.classList.toggle('na', off);
+      var ctl = el.parentNode;
+      var tip = ctl && ctl.querySelector ? ctl.querySelector('.tip') : null;
+      if (tip) tip.textContent = off ? t('touch_na') : (it.tip ? t(it.tip) : '');
+    }
+    if (!sig || sig === naShown) return '';
+    naShown = sig;
+    return t('toast_na') + ' ' + sig;
+  }
+
+  /* touch_rb：上次应用被驱动退回的项，弹一次让用户知道「已保存」不等于「已生效」 */
+  function paintRB(s) {
+    if (!s || s === rbShown) return '';
+    rbShown = s;
+    var a = String(s).split(';'), out = [];
+    for (var i = 0; i < a.length && out.length < 2; i++) {
+      var p = a[i].indexOf('=');
+      if (p <= 0) continue;
+      var name = a[i].slice(0, p), rest = a[i].slice(p + 1), g = rest.indexOf('>');
+      out.push(g >= 0 ? name + ' ' + rest.slice(0, g) + ' → ' + rest.slice(g + 1) : name + ' ' + rest);
+    }
+    return out.length ? t('toast_rollback') + ' ' + out.join('，') : '';
+  }
+
   function render(d) {
     if (!formBuilt) return;
     var on = d.touch_on === '1';
+    /* 关掉触控时把置灰还原，避免还原失败时表单长期半灰 */
+    var msgs = [paintNA(on ? d.touch_na : '')], m2 = on ? paintRB(d.touch_rb) : '';
+    if (m2) msgs.push(m2);
+    msgs = msgs.filter(function (x) { return x; });
+    if (msgs.length) C.toast(msgs.join('；'), 'bad');
     var miss = parseInt(d.touch_missing, 10) || 0;
     var avail = miss === 0;
     C.dot('touchDot', !avail ? 'warn' : on ? 'on' : '');

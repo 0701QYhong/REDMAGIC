@@ -47,6 +47,9 @@ SEP_LIMIT="$MODDIR/sep_limit"
 BOOST_LIMIT="$MODDIR/boost_limit"
 # 触控自定义快照（manual|k=v;k=v;...）：目前只由 teardown 在卸载时清理
 TOUCH_SNAPSHOT="$MODDIR/touch_snapshot.txt"
+# 触控可用性：读不出原始值（快照缺项）的项按行列出；回滚明细 name=value 按行列出
+TOUCH_NA="$MODDIR/touch_na.txt"
+TOUCH_RB="$MODDIR/touch_rollback.txt"
 
 # ---------------- 接管快照（存在 = 接管中，内含原值原权限）----------------
 SNAP_FAN="$MODDIR/.snap_fan"
@@ -117,8 +120,7 @@ if [ -z "$AC_ONLINE" ]; then
     [ -n "$AC_ONLINE" ] || AC_ONLINE=/sys/class/power_supply/usb/online
     unset _c _p
 fi
-# 温控（锁定时用 conf/empty.conf 顶替，THERMAL_CONF 只作参考副本，运行时不使用）
-THERMAL_CONF="$MODDIR/conf/thermal-engine.conf"
+# 温控（锁定时用 conf/empty.conf 顶替）
 THERMAL_TARGET=${THERMAL_TARGET:-/vendor/etc/thermal-engine.conf}
 # 亮度
 BL_DIR=${BL_DIR:-/sys/class/backlight}

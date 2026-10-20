@@ -33,7 +33,7 @@
     thermal_switch: 'Thermal mask',
     thermal_warn: 'Turning it off also stops charge boost. It is re-applied by post-fs-data before services start.',
     touch_title: 'Touch',
-    touch_desc: 'Pick each of the 13 touch parameters from the list; every write is read back and verified.',
+    touch_desc: '13 touch parameters: 5 take custom numbers, the rest are picked from tiers; every write is read back and verified.',
     touch_switch: 'Touch tuning',
     touch_preset: 'Preset',
     preset_gaming: 'Gaming',
@@ -86,7 +86,13 @@
     touch_item_6: 'Debounce px', touch_item_7: 'Debounce ms', touch_item_8: 'Click tolerance',
     touch_item_9: 'Long press', touch_item_10: 'Long press ms', touch_item_11: 'Long range',
     touch_item_12: 'Edge anti-miss',
-    toast_saved: 'Saved', toast_readonly: 'Offline, not sent',
+    tip_px: '0–255 px, common 0/10/20/50', tip_ms: '0–10000 ms, common 100/300/500',
+    tip_range4: '4 values 0–255, e.g. 10,10,20,20',
+    touch_na: 'Not supported by driver',
+    toast_range: 'Out of range', toast_empty: 'Empty',
+    toast_na: 'Not supported:', toast_rollback: 'Reverted:',
+    toast_na_all: 'Every item is unsupported by the driver',
+    toast_saved: 'Saved',
     status_offline: 'No snapshot yet — service may still be starting'
   };
   var ZH = {
@@ -121,7 +127,7 @@
     thermal_switch: '温控屏蔽',
     thermal_warn: '关闭后会连带停用充电加速。重启时由 post-fs-data 在系统服务启动前重新挂载。',
     touch_title: '触控',
-    touch_desc: '13 项触控参数全部下拉选择，写入后逐项回读核对。',
+    touch_desc: '13 项触控参数：5 项可填自定义数值，其余按档位选择；写入后逐项回读核对。',
     touch_switch: '触控优化',
     touch_preset: '预设',
     preset_gaming: '电竞',
@@ -174,7 +180,13 @@
     touch_item_6: '防抖像素', touch_item_7: '防抖时间', touch_item_8: '点击容错',
     touch_item_9: '长按识别', touch_item_10: '长按时长', touch_item_11: '长按范围',
     touch_item_12: '边缘防误触',
-    toast_saved: '已保存', toast_readonly: '未连接服务，改动未发送',
+    tip_px: '0–255 像素，常用 0/10/20/50', tip_ms: '0–10000 ms，常用 100/300/500',
+    tip_range4: '4 个 0–255，如 10,10,20,20',
+    touch_na: '驱动不支持',
+    toast_range: '超出范围', toast_empty: '未填写',
+    toast_na: '驱动不支持：', toast_rollback: '已退回：',
+    toast_na_all: '驱动均不支持，无可提交项',
+    toast_saved: '已保存',
     status_offline: '还没拿到快照 —— 服务可能仍在启动'
   };
   var LANG = localStorage.getItem('rm_lang') || ((navigator.language || 'zh').toLowerCase().indexOf('zh') === 0 ? 'zh' : 'en');

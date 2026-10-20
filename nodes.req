@@ -10,7 +10,7 @@
 电池温度|/sys/class/power_supply/battery/temp
 电池电流|/sys/class/power_supply/battery/current_now
 电池电压|/sys/class/power_supply/battery/voltage_now
-充电器在线(AC)|/sys/class/power_supply/ac/online,/sys/class/power_supply/ucsi-source-psy-*/online,/sys/class/power_supply/policy/online
+充电器在线(AC)|/sys/class/power_supply/ac/online,/sys/class/power_supply/ucsi-source-psy-*/online,/sys/class/power_supply/policy/online,/sys/class/power_supply/usb/online
 充电器在线(USB)|/sys/class/power_supply/usb/online
 限流节点|/sys/class/qcom-battery/restrict_cur
 充电使能|/sys/class/qcom-battery/charging_enabled

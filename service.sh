@@ -17,7 +17,6 @@ WEBUI_STALE_MAX=45
 DAEMONS=""
 CLEANED=""
 SVC_SELF=$$
-TOUCH_PID=""
 BRIGHT_PID=""
 WEBUI_PID=""
 
@@ -31,7 +30,7 @@ svc_alive() {
 if [ -f "$SVC_LOCK_FILE" ]; then
     _lock=$(cat "$SVC_LOCK_FILE" 2>/dev/null)
     if svc_alive "$_lock"; then
-        printf '%s\n' "$(date '+%m-%d %H:%M:%S') 已有实例 $_lock 在跑\n" >> "$LOG_FILE" 2>/dev/null
+        printf '%s\n' "$(date '+%m-%d %H:%M:%S') 已有实例 $_lock 在跑" >> "$LOG_FILE" 2>/dev/null
         exit 0
     fi
 fi
@@ -75,10 +74,8 @@ mlog "机型 $(getprop ro.product.model 2>/dev/null) / Android $(getprop ro.buil
 
 # 采样率：写得越早触控初始化越容易吃到。settings 服务可能还没起，
 # rate_boost_boot 会重试 6 次（最坏 12 秒），所以放后台，绝不阻塞开机主链
-RATE_PID=""
 if [ -f "$F_RATE" ]; then
     ( rate_boost_boot; sleep 15 ) &
-    RATE_PID=$!
 fi
 
 # 温控屏蔽：必须在充电加速之前
@@ -104,7 +101,6 @@ fi
 # 触控：节点可能还没就绪，放后台等（不阻塞主链）
 if [ -f "$F_TOUCH" ]; then
     ( TOUCH_WAIT_MAX=20; touch_apply; sleep 15 ) &
-    TOUCH_PID=$!
 fi
 
 # 亮度：同样后台等背光节点
@@ -182,12 +178,13 @@ while :; do
     if [ -f "$F_RATE" ]; then
         rate_verify || { mlog "看门狗: 采样率被改动，重新写入"; rate_boost_on; }
     fi
-    # 亮度守护是一次性长驻子进程；进程死掉且未标记不适用时才重启
+    # 亮度守护是一次性长驻子进程。运行期才打开功能时 BRIGHT_PID 为空，
+    # 也必须在这里拉起；否则界面显示已开，但没有任何进程写亮度节点。
     if [ -f "$F_BRIGHT" ] && [ ! -f "$BRIGHT_NA" ]; then
-        if [ -n "$BRIGHT_PID" ] && ! kill -0 "$BRIGHT_PID" 2>/dev/null; then
+        if [ -z "$BRIGHT_PID" ] || ! kill -0 "$BRIGHT_PID" 2>/dev/null; then
             bright_daemon &
             BRIGHT_PID=$!
-            mlog "看门狗: 亮度守护已重启"
+            mlog "看门狗: 亮度守护已启动"
         fi
     fi
     if [ -z "$WEBUI_PID" ] || ! kill -0 "$WEBUI_PID" 2>/dev/null; then

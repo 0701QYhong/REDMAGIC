@@ -82,23 +82,38 @@ touch_apply_one() {   # NODE SUB VALUE [MODE]
 
 # 第一次接管前把节点里的原始值落到 TOUCH_SNAPSHOT，关闭或卸载时按它还原。
 # 没有快照就不写节点，避免出现“能改不能还”的状态。
-touch_snapshot_save() {
-    [ -s "$TOUCH_SNAPSHOT" ] && return 0
-    touch_supported || return 1
-    local name node sub mode v tmp="${TOUCH_SNAPSHOT}.tmp"
-    : > "$tmp" 2>/dev/null || return 1
+# 读不出原始值的项写进 TOUCH_NA：这些项不写、不校验，前端置灰。
+touch_na_rebuild() {
+    [ -f "$TOUCH_NA" ] && return 0
+    [ -s "$TOUCH_SNAPSHOT" ] || return 0
+    local name node sub mode t="${TOUCH_NA}.tmp"
+    : > "$t" 2>/dev/null || return 0
     while IFS='|' read -r name node sub mode; do
         case "$name" in ''|'#'*) continue;; esac
+        grep -q "^$name=" "$TOUCH_SNAPSHOT" 2>/dev/null || printf '%s\n' "$name" >> "$t"
+    done < "$TOUCH_TABLE"
+    mv -f "$t" "$TOUCH_NA" 2>/dev/null
+}
+
+touch_snapshot_save() {
+    touch_na_rebuild
+    [ -s "$TOUCH_SNAPSHOT" ] && return 0
+    touch_supported || return 1
+    local name node sub mode v tmp="${TOUCH_SNAPSHOT}.tmp" nat="${TOUCH_NA}.tmp"
+    : > "$tmp" 2>/dev/null || return 1
+    : > "$nat" 2>/dev/null || return 1
+    while IFS='|' read -r name node sub mode; do
+        case "$name" in ''|'#'*) continue;; esac
+        v=""
         if [ -z "$sub" ]; then
-            touch_read_node "$TP_DIR/$node" || continue
-            v=$(printf '%s' "$TOUCH_RD" | tr -d ' \r\n')
+            touch_read_node "$TP_DIR/$node" && v=$(printf '%s' "$TOUCH_RD" | tr -d ' \r\n')
         else
-            touch_read_field "$sub" || continue
-            v=$(touch_norm "$TOUCH_RD" | tr ' ' ',')
+            touch_read_field "$sub" && v=$(touch_norm "$TOUCH_RD" | tr ' ' ',')
         fi
-        case "$v" in ''|*[!0-9,]*) continue;; esac
+        case "$v" in ''|*[!0-9,]*) printf '%s\n' "$name" >> "$nat"; continue;; esac
         printf '%s=%s\n' "$name" "$v" >> "$tmp"
     done < "$TOUCH_TABLE"
+    mv -f "$nat" "$TOUCH_NA" 2>/dev/null
     if [ -s "$tmp" ]; then
         mv -f "$tmp" "$TOUCH_SNAPSHOT" 2>/dev/null
     else
@@ -107,15 +122,51 @@ touch_snapshot_save() {
     [ -s "$TOUCH_SNAPSHOT" ]
 }
 
+# 不可用项不参与校验：清掉它的记忆，否则 verify 永远不符、看门狗空转。
+# 必须早于 touch_wait_ready / touch_snapshot_save：守卫失败提前 return 时也要清。
+touch_na_drop() {
+    [ -s "$TOUCH_NA" ] || return 0
+    local n v
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        v=$(stq "$n")
+        [ -n "$v" ] && cfg_set "$n" "" && touch_log "$n 无快照，已停用"
+    done < "$TOUCH_NA"
+}
+
 touch_apply() {
-    local name node sub mode ok=0 fail=0 v
+    local name node sub mode ok=0 fail=0 v sv na
+    touch_na_drop
     touch_wait_ready || { touch_log "节点缺失 $(touch_missing_nodes)/6，跳过"; return 1; }
     touch_snapshot_save || { touch_log "原始参数快照失败，取消写入"; return 1; }
+    rm -f "$TOUCH_RB" 2>/dev/null
+    na=$(tr '\n' ' ' < "$TOUCH_NA" 2>/dev/null)
     while IFS='|' read -r name node sub mode; do
         case "$name" in ''|'#'*) continue;; esac
+        case " $na " in
+            *" $name "*) continue ;;   # 不可用项：touch_na_drop 已清记忆
+        esac
         v=$(stq "$name")
         [ -n "$v" ] || continue
-        if touch_apply_one "$node" "$sub" "$v" "$mode"; then ok=$((ok + 1)); else fail=$((fail + 1)); touch_log "$name 写入/回读不符"; fi
+        if touch_apply_one "$node" "$sub" "$v" "$mode"; then
+            ok=$((ok + 1))
+            continue
+        fi
+        fail=$((fail + 1))
+        touch_log "$name 写入/回读不符"
+        # 驱动不接受：该项退回快照值并同步记忆，否则看门狗会每 15 秒重写同一项
+        sv=$(grep "^$name=" "$TOUCH_SNAPSHOT" 2>/dev/null | head -n 1 | cut -d= -f2-)
+        if [ -n "$sv" ] && touch_apply_one "$node" "$sub" "$sv" "$mode"; then
+            cfg_set "$name" "$sv"
+            # 记录「填的值>退回的值」：前端提示更清楚，不同失败尝试也不会被去重吞掉
+            printf '%s=%s>%s\n' "$name" "$v" "$sv" >> "$TOUCH_RB" 2>/dev/null
+            touch_log "$name 退回快照 $sv"
+        else
+            # 连快照值都写不进：同样停用，避免看门狗每 15 秒重写
+            touch_log "$name 退回快照失败，已停用"
+            cfg_set "$name" ""
+            grep -qx "$name" "$TOUCH_NA" 2>/dev/null || printf '%s\n' "$name" >> "$TOUCH_NA"
+        fi
     done < "$TOUCH_TABLE"
     touch_log "写入完成: 通过 $ok 项 / 失败 $fail 项"
     [ "$fail" -eq 0 ]
@@ -123,7 +174,10 @@ touch_apply() {
 
 touch_restore() {
     touch_supported || return 1
-    [ -s "$TOUCH_SNAPSHOT" ] || return 0
+    if [ ! -s "$TOUCH_SNAPSHOT" ]; then
+        rm -f "$TOUCH_NA" "$TOUCH_RB" 2>/dev/null
+        return 0
+    fi
     local name node sub mode v ok=0 fail=0
     while IFS='|' read -r name node sub mode; do
         case "$name" in ''|'#'*) continue;; esac
@@ -137,7 +191,7 @@ touch_restore() {
         fi
     done < "$TOUCH_TABLE"
     touch_log "还原完成: 通过 $ok 项 / 失败 $fail 项"
-    [ "$fail" -eq 0 ] && rm -f "$TOUCH_SNAPSHOT" 2>/dev/null
+    [ "$fail" -eq 0 ] && rm -f "$TOUCH_SNAPSHOT" "$TOUCH_NA" "$TOUCH_RB" 2>/dev/null
     [ "$fail" -eq 0 ]
 }
 
@@ -274,9 +328,12 @@ touch_preset_vals() {   # NAME
 }
 
 touch_preset_to_state() {   # 只写记忆，不写节点
-    local kv k v
+    local kv k v na=""
+    [ -s "$TOUCH_NA" ] && na=$(tr '\n' ' ' < "$TOUCH_NA" 2>/dev/null)
     for kv in $(touch_preset "$1"); do
-        k=${kv%%=*}; v=${kv#*=}; cfg_set "$k" "$v"
+        k=${kv%%=*}; v=${kv#*=}
+        case " $na " in *" $k "*) continue;; esac   # 不可用项不写记忆
+        cfg_set "$k" "$v"
     done
     cfg_set '触控预设' "$1"
 }

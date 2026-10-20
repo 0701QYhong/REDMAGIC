@@ -87,6 +87,7 @@ status_body() {
     local rate_v="0" rate_cap="" rate_tgt="0" be=0 mf te=0 i
     local fan_on=0 pump_on=0 fan_keep=0 pump_keep=0 fan_temp=0 pump_temp=0
     local thermal_on=0 boost_on=0 boost_heat=0 bright_on=0 bright_avail=1 touch_on=0 rate_on=0
+    local tna="" trb=""
     local ftthr=40 ptthr=40 boost_thr=42 bl_cur=0 bl_max=0 bl_goal=0
     # 一次读完 state.txt：下面十几项记忆值都从变量取，不再逐项 fork grep
     state_load
@@ -174,6 +175,9 @@ status_body() {
     tmiss=$TOUCH_MISSING
     touch_vals_build
     tvals=$TOUCH_VALS
+    # 不可用项 / 上次被驱动退回的项：前端据此置灰和提示
+    [ -s "$TOUCH_NA" ] && tna=$(tr '\n' ',' < "$TOUCH_NA" 2>/dev/null | sed 's/,$//')
+    [ -s "$TOUCH_RB" ] && trb=$(tr '\n' ';' < "$TOUCH_RB" 2>/dev/null | sed 's/;$//')
     tpreset=$ST_TP
     case "$tpreset" in official_gaming|official_daily) ;; *) tpreset="official_gaming";; esac
     # 与所选预设的定义逐项比对：全一致才算 preset，否则算用户手调 manual
@@ -253,6 +257,8 @@ status_body() {
     echo "touch_preset=$tpreset"
     echo "touch_mode=$tm"
     echo "touch_vals=$tvals"
+    echo "touch_na=$tna"
+    echo "touch_rb=$trb"
     echo "rate_on=$rate_on"
     echo "rate_value=$rate_v"
     echo "rate_max=$rate_cap"

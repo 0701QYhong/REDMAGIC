@@ -1,4 +1,4 @@
-/* REDMAGIC v3.0.2 —— 通信层：命令队列、状态快照、心跳、日志、自检
+/* REDMAGIC v3.0.5 —— 通信层：命令队列、状态快照、心跳、日志、自检
    数据契约（与 lib/paths.sh 一致）：
      <MODDIR>/webui_cmd     命令队列（服务端每轮 mv 走再逐行分发）
      <MODDIR>/webui_status  服务端产出的快照：每行一条 key=value（不是 JSON）

@@ -18,13 +18,15 @@ cfreq_nodes() {
         /sys/class/kgsl/kgsl-3d0/min_gpuclk
 }
 
-# 结果缓存 1 秒：reconcile（3s）和 status（0.5s）都会问一次，mount 每次都要 fork 解析
+# 结果缓存 1 秒：reconcile（3s）和 status（0.5s）都会问一次，mount 每次都要 fork 解析。
+# 挂载状态由本脚本改变时必须主动清缓存，否则同一秒内会读到改动前的结论。
 TE_AT=""
 TE_VAL=""
+thermal_cache_clear() { TE_AT=""; TE_VAL=""; }
 thermal_effective() {
     local t
     t=$(date +%s 2>/dev/null)
-    if [ "$TE_AT" = "$t" ] && [ -n "$TE_VAL" ]; then
+    if [ -n "$t" ] && [ "$TE_AT" = "$t" ] && [ -n "$TE_VAL" ]; then
         [ "$TE_VAL" = "1" ]
         return $?
     fi
@@ -49,12 +51,13 @@ thermal_umbind() {
         umount "$THERMAL_TARGET" 2>/dev/null || umount -l "$THERMAL_TARGET" 2>/dev/null
         i=$((i + 1))
     done
+    thermal_cache_clear
     thermal_bound && return 1
     return 0
 }
 
 cfreq_unlock() {
-    local n=0 m f seen=""
+    local n=0 m f seen="" perm
     : > "$SNAP_CFREQ" 2>/dev/null
     for f in $(cfreq_nodes); do
         [ -e "$f" ] || continue
@@ -64,13 +67,14 @@ cfreq_unlock() {
         m=$(stat -c %a "$f" 2>/dev/null)
         case "$m" in ''|*[!0-7]*) continue;; esac
         printf '%s=%s\n' "$f" "$m" >> "$SNAP_CFREQ" 2>/dev/null
-        # stat -c %a 是八进制字符串，直接做数值比较会把它当十进制（664 > 1000 是错的）。
-        # 补到固定 8 位按字符串比，等价于按八进制从左到右比，且不依赖 shell 的进制前缀：
-        # 8 位留出 2 位特殊位，1000/1001 这类"看起来数字很大、实际权限很严"的也会放宽。
-        _mo=$(printf '%08d' "$m")
-        _mn=$(printf '%08d' "$CFREQ_MODE")
-        # 已达标（_mo >= _mn）就跳过：排序后第一行是 _mn 说明 _mn 不小于 _mo
-        if [ "$(printf '%s\n%s\n' "$_mo" "$_mn" | sort | head -n 1)" = "$_mn" ]; then
+        # stat -c %a 是八进制字符串，可能带一位特殊位。只取低 3 位权限位做
+        # 字典序比较；补零方案会把 1000 当成 00001000，从而误判为已达标。
+        case "$m" in
+            [0-7]*[0-7][0-7]) perm=${m#"${m%???}"} ;;
+            *) continue ;;
+        esac
+        # 已达标（perm >= 664）就跳过：排序后第一行是目标值说明目标不大于当前值
+        if [ "$(printf '%s\n%s\n' "$perm" "$CFREQ_MODE" | sort | head -n 1)" = "$CFREQ_MODE" ]; then
             continue
         fi
         chmod "$CFREQ_MODE" "$f" 2>/dev/null && n=$((n + 1))
@@ -116,6 +120,7 @@ thermal_lockstate() {
         errlog "温控屏蔽: bind 空配置失败"
         return 1
     fi
+    thermal_cache_clear
     cfreq_unlock
     mlog "温控屏蔽: 已生效（空配置顶替 + 频率解权）"
     return 0
