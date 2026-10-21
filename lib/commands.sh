@@ -193,6 +193,7 @@ webui_handle_cmd() {
                     mlog "触控: 节点缺失，无法开启"
                     rm -f "$F_TOUCH"; cfg_set '触控优化' 0
                 else
+                    rm -f "$TOUCH_DEFER" 2>/dev/null   # 显式开启：此前暂缓的项全部重试
                     touch_apply
                 fi
             else
@@ -214,7 +215,11 @@ webui_handle_cmd() {
             cfg_set "$k" "$val"
             ;;
         touch_apply)
-            [ -f "$F_TOUCH" ] && touch_apply
+            if [ -f "$F_TOUCH" ]; then
+                # 用户点了「应用」= 明确的重新应用请求：暂缓项全部再试一次
+                rm -f "$TOUCH_DEFER" 2>/dev/null
+                touch_apply
+            fi
             ;;
         # ---------- 采样率 ----------
         rate_on)

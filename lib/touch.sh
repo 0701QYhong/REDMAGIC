@@ -21,10 +21,23 @@ touch_missing_nodes() {
 }
 touch_supported() { [ "$(touch_missing_nodes)" = "0" ]; }
 
+# 某项节点当前是否可读。用来区分两种失败：
+#   - 读不出 = 驱动还没就绪（开机早期），只是暂时状态，绝不能动记忆
+#   - 读得出但写进去回读不符 = 驱动真的不接受这个值，记忆保留、记入 defer
+touch_field_readable() {   # NODE SUB
+    if [ -z "$2" ]; then
+        touch_read_node "$TP_DIR/$1"
+    else
+        touch_read_field "$2"
+    fi
+}
+
 touch_wait_ready() {
     local i=0
     while [ "$i" -lt "$TOUCH_WAIT_MAX" ]; do
-        touch_supported && return 0
+        # 节点存在 ≠ 驱动就绪：edge_report_limit 初始化前内容为空，
+        # 此时写入必然回读不符，会被误判成「驱动不接受」而冲掉用户的记忆值。
+        touch_supported && touch_read_node "$TP_DIR/edge_report_limit" && return 0
         sleep 1
         i=$((i + 1))
     done
@@ -122,52 +135,95 @@ touch_snapshot_save() {
     [ -s "$TOUCH_SNAPSHOT" ]
 }
 
-# 不可用项不参与校验：清掉它的记忆，否则 verify 永远不符、看门狗空转。
-# 必须早于 touch_wait_ready / touch_snapshot_save：守卫失败提前 return 时也要清。
-touch_na_drop() {
+# 不可用项不参与校验，避免 verify 永远不符、看门狗空转。
+# 注意这里只做「本轮不写不校验」，绝不删用户的记忆值：
+# 以前这里 cfg_set "$n" ""，驱动开机没就绪时会把用户填的自定义数值整项抹掉，
+# 用户看到的就是「重启后参数变回默认、界面读不到」。
+touch_na_has() { [ -s "$TOUCH_NA" ] && grep -qx "$1" "$TOUCH_NA" 2>/dev/null; }
+
+# 不可用项现在能读了（驱动重新就绪 / 换了机型）就撤掉标记，恢复可用。
+touch_na_prune() {
     [ -s "$TOUCH_NA" ] || return 0
-    local n v
-    while IFS= read -r n; do
-        [ -n "$n" ] || continue
-        v=$(stq "$n")
-        [ -n "$v" ] && cfg_set "$n" "" && touch_log "$n 无快照，已停用"
-    done < "$TOUCH_NA"
+    local name node sub mode t="${TOUCH_NA}.tmp" keep=0
+    : > "$t" 2>/dev/null || return 0
+    while IFS='|' read -r name node sub mode; do
+        case "$name" in ''|'#'*) continue;; esac
+        grep -qx "$name" "$TOUCH_NA" 2>/dev/null || continue
+        if touch_field_readable "$node" "$sub"; then
+            touch_log "$name 节点已就绪，恢复可用"
+        else
+            printf '%s\n' "$name" >> "$t"
+            keep=$((keep + 1))
+        fi
+    done < "$TOUCH_TABLE"
+    if [ "$keep" -gt 0 ]; then
+        mv -f "$t" "$TOUCH_NA" 2>/dev/null
+    else
+        rm -f "$t" "$TOUCH_NA" 2>/dev/null
+    fi
+    return 0
+}
+
+# 暂缓项：驱动确实不接受这个值，但记忆必须保留（用户下次还能看到自己填的数）。
+# verify 跳过这些项，否则看门狗每 15 秒重写一次同一项。
+touch_defer_has() { [ -s "$TOUCH_DEFER" ] && grep -qx "$1" "$TOUCH_DEFER" 2>/dev/null; }
+touch_defer_add() {
+    [ -n "$1" ] || return 0
+    touch_defer_has "$1" && return 0
+    printf '%s\n' "$1" >> "$TOUCH_DEFER" 2>/dev/null
+}
+touch_defer_del() {
+    [ -s "$TOUCH_DEFER" ] || return 0
+    grep -vx "$1" "$TOUCH_DEFER" > "${TOUCH_DEFER}.tmp" 2>/dev/null
+    if [ -s "${TOUCH_DEFER}.tmp" ]; then
+        mv -f "${TOUCH_DEFER}.tmp" "$TOUCH_DEFER" 2>/dev/null
+    else
+        rm -f "${TOUCH_DEFER}.tmp" "$TOUCH_DEFER" 2>/dev/null
+    fi
 }
 
 touch_apply() {
-    local name node sub mode ok=0 fail=0 v sv na
-    touch_na_drop
-    touch_wait_ready || { touch_log "节点缺失 $(touch_missing_nodes)/6，跳过"; return 1; }
+    local name node sub mode ok=0 fail=0 v sv na skip=0 want=0
+    touch_na_prune
+    touch_wait_ready || { touch_log "节点未就绪(缺失 $(touch_missing_nodes)/6)，跳过"; return 1; }
     touch_snapshot_save || { touch_log "原始参数快照失败，取消写入"; return 1; }
     rm -f "$TOUCH_RB" 2>/dev/null
     na=$(tr '\n' ' ' < "$TOUCH_NA" 2>/dev/null)
     while IFS='|' read -r name node sub mode; do
         case "$name" in ''|'#'*) continue;; esac
-        case " $na " in
-            *" $name "*) continue ;;   # 不可用项：touch_na_drop 已清记忆
-        esac
         v=$(stq "$name")
         [ -n "$v" ] || continue
+        want=$((want + 1))
+        case " $na " in
+            *" $name "*) skip=$((skip + 1)); continue ;;   # 不可用项：不写不校验，记忆保留
+        esac
         if touch_apply_one "$node" "$sub" "$v" "$mode"; then
             ok=$((ok + 1))
+            touch_defer_del "$name"
             continue
         fi
         fail=$((fail + 1))
         touch_log "$name 写入/回读不符"
-        # 驱动不接受：该项退回快照值并同步记忆，否则看门狗会每 15 秒重写同一项
+        # 节点读不出来 = 驱动还没就绪，本轮放弃这一项，记忆原样保留，稍后重试
+        if ! touch_field_readable "$node" "$sub"; then
+            touch_log "$name 节点暂不可读，稍后重试"
+            continue
+        fi
+        # 驱动读得出但不接受这个值：节点退回快照值，记忆绝不改写
         sv=$(grep "^$name=" "$TOUCH_SNAPSHOT" 2>/dev/null | head -n 1 | cut -d= -f2-)
         if [ -n "$sv" ] && touch_apply_one "$node" "$sub" "$sv" "$mode"; then
-            cfg_set "$name" "$sv"
             # 记录「填的值>退回的值」：前端提示更清楚，不同失败尝试也不会被去重吞掉
             printf '%s=%s>%s\n' "$name" "$v" "$sv" >> "$TOUCH_RB" 2>/dev/null
             touch_log "$name 退回快照 $sv"
-        else
-            # 连快照值都写不进：同样停用，避免看门狗每 15 秒重写
-            touch_log "$name 退回快照失败，已停用"
-            cfg_set "$name" ""
-            grep -qx "$name" "$TOUCH_NA" 2>/dev/null || printf '%s\n' "$name" >> "$TOUCH_NA"
         fi
+        # 值留在记忆里，只把它记进 defer；看门狗不再反复重写同一项
+        touch_defer_add "$name"
     done < "$TOUCH_TABLE"
+    # 全部有值的项都读不出 = 驱动还没就绪，一项没写。不能报成功，也不能动记忆。
+    if [ "$ok" -eq 0 ] && [ "$skip" -gt 0 ] && [ "$skip" -eq "$want" ]; then
+        touch_log "驱动未就绪: $skip/$want 项不可读，保留记忆稍后重试"
+        return 1
+    fi
     touch_log "写入完成: 通过 $ok 项 / 失败 $fail 项"
     [ "$fail" -eq 0 ]
 }
@@ -175,7 +231,7 @@ touch_apply() {
 touch_restore() {
     touch_supported || return 1
     if [ ! -s "$TOUCH_SNAPSHOT" ]; then
-        rm -f "$TOUCH_NA" "$TOUCH_RB" 2>/dev/null
+        rm -f "$TOUCH_NA" "$TOUCH_RB" "$TOUCH_DEFER" 2>/dev/null
         return 0
     fi
     local name node sub mode v ok=0 fail=0
@@ -191,17 +247,24 @@ touch_restore() {
         fi
     done < "$TOUCH_TABLE"
     touch_log "还原完成: 通过 $ok 项 / 失败 $fail 项"
-    [ "$fail" -eq 0 ] && rm -f "$TOUCH_SNAPSHOT" "$TOUCH_NA" "$TOUCH_RB" 2>/dev/null
+    [ "$fail" -eq 0 ] && rm -f "$TOUCH_SNAPSHOT" "$TOUCH_NA" "$TOUCH_RB" "$TOUCH_DEFER" 2>/dev/null
     [ "$fail" -eq 0 ]
 }
 
 touch_verify() {
     local name node sub mode ok=0 fail=0 v
     touch_supported || return 1
+    # 驱动晚就绪时先把恢复可读的项从不可用列表撤掉；
+    # 之后它们会以「不符」的形式被下面的比对发现，由看门狗重新写入。
+    # NA 为空时这一步直接返回，不产生额外开销。
+    touch_na_prune
     while IFS='|' read -r name node sub mode; do
         case "$name" in ''|'#'*) continue;; esac
         v=$(stq "$name")
         [ -n "$v" ] || continue
+        # 不可用项(快照缺项)/已知暂缓项不校验：记忆保留着，节点写不进去不是故障
+        touch_na_has "$name" && continue
+        touch_defer_has "$name" && continue
         if [ -z "$sub" ]; then touch_read_node "$TP_DIR/$node" || { fail=$((fail + 1)); continue; }; else touch_read_field "$sub" || { fail=$((fail + 1)); continue; }; fi
         if [ "$(touch_norm "$TOUCH_RD")" = "$(touch_norm "$v")" ]; then ok=$((ok + 1)); else fail=$((fail + 1)); fi
     done < "$TOUCH_TABLE"

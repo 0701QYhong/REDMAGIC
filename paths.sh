@@ -50,6 +50,8 @@ TOUCH_SNAPSHOT="$MODDIR/touch_snapshot.txt"
 # 触控可用性：读不出原始值（快照缺项）的项按行列出；回滚明细 name=value 按行列出
 TOUCH_NA="$MODDIR/touch_na.txt"
 TOUCH_RB="$MODDIR/touch_rollback.txt"
+# 暂缓项：写入/回读不符、但记忆值必须保留的项；verify 跳过它们，避免看门狗空转
+TOUCH_DEFER="$MODDIR/touch_defer.txt"
 
 # ---------------- 接管快照（存在 = 接管中，内含原值原权限）----------------
 SNAP_FAN="$MODDIR/.snap_fan"

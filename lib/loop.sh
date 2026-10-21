@@ -122,6 +122,8 @@ reconcile() {
 # 前端只看得到「记忆值」，看不到「节点实际值」。所以一发现心跳从无到有，就先核对再出快照。
 webui_open_hook() {
     if [ -f "$F_TOUCH" ] && [ "$(touch_missing_nodes)" = "0" ]; then
+        # 打开界面 = 给之前暂缓的项一次重试机会（驱动可能已就绪）
+        rm -f "$TOUCH_DEFER" 2>/dev/null
         touch_verify || { mlog "WebUI 打开: 触控节点与记忆不符，重新写入"; touch_apply; }
     fi
     if [ -f "$F_RATE" ]; then

@@ -91,7 +91,7 @@ td_runtime() {   # $1 = uninstall | service
     rm -f "$SNAP_FAN" "$SNAP_PUMP" "$SNAP_BOOST" "$SNAP_CFREQ" "$SNAP_HEAT" \
           "$SNAP_FAN_KEEP" "$SNAP_PUMP_KEEP" "$RATE_SNAPSHOT" \
           "$SEP_CACHE" "$RATE_CACHE" \
-          "$TOUCH_SNAPSHOT" "$TOUCH_NA" "$TOUCH_RB" "$SEP_LIMIT" "$BOOST_LIMIT" 2>/dev/null
+          "$TOUCH_SNAPSHOT" "$TOUCH_NA" "$TOUCH_RB" "$TOUCH_DEFER" "$SEP_LIMIT" "$BOOST_LIMIT" 2>/dev/null
     return 0
 }
 
