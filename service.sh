@@ -170,6 +170,7 @@ svc_sleep() {
 while :; do
     svc_sleep 15
     if [ -f "$F_TOUCH" ]; then
+        touch_na_prune   # 驱动晚就绪：撤销已恢复项的置灰，让下面的 verify 发现并回写；NA 为空时零开销
         if ! touch_verify; then
             mlog "看门狗: 触控参数被改动，重新写入"
             touch_apply

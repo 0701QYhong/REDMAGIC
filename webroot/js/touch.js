@@ -1,7 +1,8 @@
-/* REDMAGIC v3.0.5 —— 触控页：8 项档位下拉 + 5 项自定义数值（只收整数）
+/* REDMAGIC v3.0.7 —— 触控页：8 项档位下拉 + 5 项自定义数值（只收整数）
    数据流是单向的：
      快照 touch_vals（英文短名=值;…）→ 回填表单（dirty 时跳过）→ 用户改 → dirty=1
-     → 点「应用」：逐项发 touch_param 存记忆，再发 touch_apply 写节点 → dirty=0
+     → 抖动 600ms 自动保存（也保留「应用」按钮）：逐项发 touch_param 存记忆，再发
+       touch_apply 写节点 → dirty=0。后端看门狗每 15s 自动核对节点与记忆。
    自定义项按驱动实测范围校验：像素 0–255，时间 0–10000 ms，长按范围 4 个 0–255。 */
 (function (g) {
   'use strict';
@@ -123,6 +124,7 @@
       el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', function () {
         dirty = true;
         markDirty();
+        scheduleAutoSave();   // 自定义参数改完自动保存并写节点
         var it = itemOf(this.getAttribute('data-k'));
         if (!it || (!it.num && !it.list)) return;
         var ok = this.value === '' || normVal(it, this.value) !== '';
@@ -231,8 +233,9 @@
     return '';
   }
 
-  /* 逐项发命令；全部发完才发 touch_apply 写节点 */
-  function applyAll() {
+  /* 逐项发命令；全部发完才发 touch_apply 写节点。
+     silent=1 是自动保存路径：只弹「已保存」，不弹「已应用」。 */
+  function applyAll(silent) {
     var vals = readForm();
     /* readForm 已为具体项弹过「超出范围/未填写」，这里再弹会把它盖掉 */
     if (!vals) return;
@@ -247,18 +250,46 @@
       chain = chain.then(function () { return g.API.send('touch_param', kv); });
       i++;
     });
-    if (i === 0) { C.toast(t('toast_na_all'), 'bad'); return; }
+    if (i === 0) { if (!silent) C.toast(t('toast_na_all'), 'bad'); return; }
     chain.then(function () {
       return g.API.send('touch_apply', '');
     }).then(function () {
       dirty = false;
       markDirty();
-      C.toast(t('toast_applied'), 'ok');
+      C.toast(t(silent ? 'toast_saved' : 'toast_applied'), 'ok');
       g.API.refreshSoon();
     }, function (e) {
-      C.toastErr(e);
+      if (!silent) C.toastErr(e);
       g.API.refreshSoon();
     });
+  }
+
+  /* 表单是否全部填对：自动保存时用它静默判断，避免半截输入时弹提示、抢焦点 */
+  function formOk() {
+    var is = inputs();
+    for (var i = 0; i < is.length; i++) {
+      var el = is[i];
+      if (el.disabled) continue;
+      var it = itemOf(el.getAttribute('data-k'));
+      if (!it) continue;
+      if (it.num || it.list) {
+        if (String(el.value).replace(/\s+/g, '') === '' || normVal(it, el.value) === '') return false;
+      } else if (!/^[0-9]+$/.test(String(el.value).replace(/\s+/g, ''))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /* 改完就自动存：抖动 600ms 后发参数 + 应用，不用再点按钮 */
+  var autoTimer = null;
+  function scheduleAutoSave() {
+    if (autoTimer) clearTimeout(autoTimer);
+    autoTimer = setTimeout(function () {
+      autoTimer = null;
+      if (!dirty || !formOk()) return;   // 输入未完成/越界：保持 dirty，等继续改
+      applyAll(true);
+    }, 600);
   }
 
   /* 「还原」= 回到当前生效值（快照里的 touch_vals），不是回到出厂 */
@@ -329,7 +360,7 @@
     if (!avail) s = t('t_disabled') + ' · ' + miss + '/6';
     else if (!on) s = t('t_idle');
     else if (d.touch_mode === 'preset') s = t('t_touch_ok');
-    else s = t('t_touch_bad');
+    else s = t('t_touch_custom');
     C.setText('touchStateDesc', s);
 
     if (!dirty) {
@@ -356,8 +387,9 @@
       applyPreset(v);
       C.paintSeg('touchPresetSeg', v);
       C.toast(t('toast_saved'), 'ok');
+      scheduleAutoSave();
     });
-    document.getElementById('touchApply').addEventListener('click', applyAll);
+    document.getElementById('touchApply').addEventListener('click', function () { applyAll(false); });
     document.getElementById('touchReset').addEventListener('click', revert);
   }
 

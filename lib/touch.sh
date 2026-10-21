@@ -254,10 +254,6 @@ touch_restore() {
 touch_verify() {
     local name node sub mode ok=0 fail=0 v
     touch_supported || return 1
-    # 驱动晚就绪时先把恢复可读的项从不可用列表撤掉；
-    # 之后它们会以「不符」的形式被下面的比对发现，由看门狗重新写入。
-    # NA 为空时这一步直接返回，不产生额外开销。
-    touch_na_prune
     while IFS='|' read -r name node sub mode; do
         case "$name" in ''|'#'*) continue;; esac
         v=$(stq "$name")

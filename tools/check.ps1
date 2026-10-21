@@ -44,7 +44,11 @@ if (Test-Path (Join-Path $root "install.sh")) {
 
 # 4) Android sh syntax (needs a connected device)
 if (-not $SkipDevice -and (Test-Path $Adb)) {
+    # adb 未连设备时会把错误写到 stderr，Stop 模式下会直接抛异常中断自检
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $dev = & $Adb get-state 2>$null
+    $ErrorActionPreference = $eap
     if ($dev -eq "device") {
         Get-ChildItem $root -Recurse -Filter *.sh | ForEach-Object {
             $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
@@ -56,3 +60,5 @@ if (-not $SkipDevice -and (Test-Path $Adb)) {
 
 if ($fail -gt 0) { Write-Host "`n$fail failed" -ForegroundColor Red; exit 1 }
 Write-Host "`nall checks passed" -ForegroundColor Green
+# 显式 0：无设备时 adb get-state 的退出码会残留到 $LASTEXITCODE，让 build.ps1 误判
+exit 0
